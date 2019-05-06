@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/joho/godotenv/autoload"
 	"go-telebot/commands"
 	tb "gopkg.in/tucnak/telebot.v2"
@@ -16,6 +17,7 @@ var (
 	BotToken = os.Getenv("TB_TOKEN")
 )
 
+
 func main() {
 	fmt.Println("Initializing go telebot...")
 
@@ -28,21 +30,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Unable to connect to bot server: %v", err)
 	}
+	db := sqlx.MustConnect("sqlite3", ":memory:")
 
-	bh := commands.HandleCMD(bot, log, &BotName)
+	bh := commands.HandleCMD(bot, log, &BotName, db)
 
-	bot.Handle("/hello", func(m *tb.Message) {
-		go bh.HandleGreeting(m)
-	})
+	bh.SetupRoutes()
 
-	bot.Handle("/record", func(m *tb.Message) {
-		go bh.HandleRecording(m)
-	})
-
-	bot.Handle("/pic", func(m *tb.Message) {
-		go bh.HandleSnap(m)
-	})
-
-	bot.Start()
+	bh.Bot.Start()
 
 }

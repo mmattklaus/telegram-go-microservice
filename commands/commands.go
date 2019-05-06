@@ -2,53 +2,94 @@ package commands
 
 import (
 	"fmt"
+	"github.com/jmoiron/sqlx"
+	e "go-telebot/ems"
+	f "go-telebot/functions"
 	tb "gopkg.in/tucnak/telebot.v2"
 	"log"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
+/**
+* @todo Map cmds to a list of possible alternatives
+* @todo Save request to database in Middleware <Monitor>
+*/
+
 type BotHandler struct {
-	ID *string
-	bot *tb.Bot
-	log *log.Logger
+	ID   *string
+	Bot  *tb.Bot
+	log  *log.Logger
+	db   *sqlx.DB
 }
 
-func HandleCMD(tb *tb.Bot, l *log.Logger, id *string) *BotHandler {
+func HandleCMD(tb *tb.Bot, l *log.Logger, id *string, db *sqlx.DB) *BotHandler {
 	return &BotHandler{
-		ID: id,
-		bot: tb,
+		ID:  id,
+		Bot: tb,
 		log: l,
+		db:  db,
 	}
 }
 
+func (bh *BotHandler) SetupRoutes() {
+	bh.Bot.Handle("/start", bh.Monitor(bh.HandleWelcome))
+
+	bh.Bot.Handle("/hello", bh.Monitor(bh.HandleGreeting))
+
+	bh.Bot.Handle("/record", bh.Monitor(bh.HandleRecording))
+
+	bh.Bot.Handle("/pic", bh.Monitor(bh.HandleSnap))
+
+	bh.Bot.Handle("/ip", bh.Monitor(bh.HandleIP))
+
+	// General catchers
+	bh.Bot.Handle(tb.OnText, func(m *tb.Message) {
+		// all the text messages that weren't
+		// captured by existing handlers
+	})
+
+	bh.Bot.Handle(tb.OnPhoto, func(m *tb.Message) {
+		// photos only
+	})
+
+	bh.Bot.Handle(tb.OnChannelPost, func (m *tb.Message) {
+		// channel posts only
+	})
+
+	bh.Bot.Handle(tb.OnQuery, func (q *tb.Query) {
+		// incoming inline queries
+	})
+}
+
 func (bh *BotHandler) HandleGreeting(m *tb.Message) {
-	fmt.Printf("Firstname: %+v  Lastname: %s  ID: %v  Username: %v LangCode: %v\n", m.Sender.FirstName, m.Sender.LastName, m.Sender.ID, m.Sender.Username, m.Sender.LanguageCode)
-	_, err := bh.bot.Reply(m, fmt.Sprintf("hello, %s", m.Sender.FirstName))
+	_, err := bh.Bot.Reply(m, fmt.Sprintf("Hello, %s %s", m.Sender.FirstName, e.Ems("wink", "smile", "cloud")))
 	if err != nil {
 		bh.log.Fatalln(err)
 	}
 }
 func (bh *BotHandler) HandleSnap(m *tb.Message) {
-		filename := fmt.Sprintf("%d.jpg", time.Now().UnixNano())
-		bh.log.Printf("snapping image")
-		// snap photo with commandline
-		err := snap(filename)
-		// load photo
-		photo := &tb.Photo{File: tb.FromDisk(filename)}
-		// Sender photo as a reply
-		_, err = bh.bot.Reply(m, photo)
-		if err != nil {
-			bh.log.Fatalln(err)
-		}
-		// Delete image after sending
-		err = os.Remove(filename)
-		if err != nil {
-			bh.log.Fatalln(err)
-		}
+	filename := fmt.Sprintf("%d.jpg", time.Now().UnixNano())
+	bh.log.Printf("snapping image")
+	_, _ = bh.Bot.Reply(m, fmt.Sprintf("%s...", e.Ems("camera")))
+	// snap photo with commandline
+	err :=  f.Snap(filename)
+	// load photo
+	photo := &tb.Photo{File: tb.FromDisk(filename)}
+	// Sender photo as a reply
+	_, err = bh.Bot.Reply(m, photo)
+	if err != nil {
+		bh.log.Fatalln(err)
+	}
+	// Delete image after sending
+	err = os.Remove(filename)
+	if err != nil {
+		bh.log.Fatalln(err)
+	}
 }
 
 func (bh *BotHandler) HandleRecording(m *tb.Message) {
@@ -56,16 +97,16 @@ func (bh *BotHandler) HandleRecording(m *tb.Message) {
 	payload := strings.Split(m.Payload, " ")
 	duration, err := strconv.Atoi(payload[0])
 	if err != nil {
-		bh.log.Println("unable to convert duration")
+		bh.log.Println("Duration not specified")
 		duration = 3
 	}
 	filename := fmt.Sprintf("%d.wav", time.Now().UnixNano())
 
-	func() {
-		err := record(filename, duration)
+	go func() {
+		err := f.Record(filename, duration)
 		if err != nil {
-			defer bh.log.Println("unable to record audio.")
-			_, err = bh.bot.Reply(m, "Sorry, I couldn't record the audio.")
+			defer bh.log.Printf("unable to record audio: %v", err)
+			_, err = bh.Bot.Reply(m, "Sorry, I couldn't record the audio.")
 			if err != nil {
 				bh.log.Fatalf("Error message not sent to user: %v", m.Sender)
 			}
@@ -73,32 +114,45 @@ func (bh *BotHandler) HandleRecording(m *tb.Message) {
 		bh.log.Println("audio recorded. Sending")
 		path := fmt.Sprintf("%s/%s", wd, filename)
 		audio := &tb.Audio{File: tb.FromDisk(path)}
-		_, err = bh.bot.Send(m.Sender, audio)
+		_, err = bh.Bot.Send(m.Sender, audio)
 		if err != nil {
 			bh.log.Printf("unable to send audio to: %v", m.Sender.FirstName)
 		}
+		err = os.Remove(path)
 	}()
-	_, err = bh.bot.Send(m.Sender, "recording...", &tb.SendOptions{
+	_, err = bh.Bot.Send(m.Sender, fmt.Sprintf("%s...", e.Ems("microphone")), &tb.SendOptions{
 		ReplyTo: m,
 	})
 }
 
-func record(filename string, duration int) error {
-	if duration > 5 * 60 {
-		fmt.Println("duration too lengthy")
-		duration = 3
+func (bh *BotHandler) HandleIP(m *tb.Message) {
+	ip, err := f.Ip()
+	if len(ip) > 0 {
+		_, err := bh.Bot.Reply(m, ip)
+		if err != nil {
+			log.Fatalf("err sending ip addr: %v", err)
+		}
 	}
-	fmt.Println(duration)
-	cmd := exec.Command("rec", "-r", "160000", "-c", "1", filename , "trim", "0", string(duration)) //
-
-	env := os.Environ()
-	// env = append(env, "AUDIODEV=hw:1,0")
-	cmd.Env = env
-	fmt.Println("recording audio...")
-	return cmd.Run()
+	if err != nil {
+		log.Fatalf("error in handle cmd: %v", err)
+	}
 }
 
-func snap(filename string) (error) {
-	cmd := exec.Command("fswebcam", "--no-banner",  filename)
-	return cmd.Run()
+func (bh *BotHandler) HandleWelcome(m *tb.Message) {
+	_, err := bh.Bot.Reply(m, fmt.Sprintf("I personnal welcome you! %s %s", e.Ems("wink", "heart"), *bh.ID))
+	if err != nil {
+		log.Fatalf("unable to send welcome message: %v", err)
+	}
+}
+
+/*
+* Middleware to handle requests
+*/
+func (bh *BotHandler) Monitor(next func(m *tb.Message)) func(m *tb.Message) {
+	return func(m *tb.Message) {
+		startTime := time.Now()
+		user := m.Sender.FirstName
+		go next(m)
+		defer bh.log.Printf("Request made by {%s} in %s", user, time.Since(startTime))
+	}
 }
